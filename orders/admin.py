@@ -1,8 +1,10 @@
 import datetime
 
+from django import forms
 from django.contrib import admin, messages
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
+from django.forms import BaseInlineFormSet
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.template.response import TemplateResponse
@@ -17,9 +19,17 @@ from customers.admin import format_money
 from customers.services import get_balance
 from producers.models import Producer
 
+from .exceptions import OrderError
 from .exports import build_summary_workbook, workbook_to_bytes
-from .models import Order, OrderLine, OrderStatus, SummaryDelivery, SummaryTrigger
+from .models import (
+    Order,
+    OrderLine,
+    OrderStatus,
+    SummaryDelivery,
+    SummaryTrigger,
+)
 from .notifications import XLSX_CONTENT_TYPE, send_summary, summary_filename
+from .services import prepare_order
 from .summary import build_summary, default_summary_date
 
 # Цвета бейджей статусов: «требует решения» — оранжевый (ждёт производство),
@@ -34,12 +44,58 @@ STATUS_COLORS = {
 }
 
 
+class OrderAddForm(forms.ModelForm):
+    """Новый заказ, внесённый сотрудником (например, по телефону)."""
+
+    class Meta:
+        model = Order
+        fields = ("point", "delivery_date", "comment")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["delivery_date"].required = False
+        self.fields["delivery_date"].help_text = (
+            "Оставьте пустым: подставится ближайшая дата доставки. Сотрудник может "
+            "выбрать любую дату от сегодняшней, срок приёма не проверяется."
+        )
+
+
+class OrderLineFormSet(BaseInlineFormSet):
+    def clean(self):
+        super().clean()
+        order = self.instance
+        if any(self.errors) or not order._state.adding or order.point_id is None:
+            return
+        lines = [
+            (form.cleaned_data["product"], form.cleaned_data["quantity"])
+            for form in self.forms
+            if form.cleaned_data
+            and not form.cleaned_data.get("DELETE")
+            and form.cleaned_data.get("product")
+        ]
+        try:
+            # Те же правила, что при оформлении точкой: минимум, кратность, порог.
+            order._prepared = prepare_order(
+                point=order.point,
+                user=None,
+                lines=lines,
+                delivery_date=order.delivery_date,
+                staff=True,
+            )
+        except OrderError as error:
+            raise ValidationError(error.message) from error
+
+
 class OrderLineInline(admin.TabularInline):
     model = OrderLine
+    formset = OrderLineFormSet
     extra = 0
     fields = ("product", "quantity", "unit", "unit_price", "line_total")
     readonly_fields = ("unit", "unit_price", "line_total")
     autocomplete_fields = ("product",)
+
+    def get_extra(self, request, obj=None, **kwargs):
+        return 3 if obj is None else 0
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
         if db_field.name == "product":
@@ -119,9 +175,35 @@ class OrderAdmin(ProducerScopedAdmin):
         ("Служебное", {"fields": ("created_by", "created_at")}),
     )
 
+    def get_form(self, request, obj=None, **kwargs):
+        if obj is None:
+            kwargs["form"] = OrderAddForm
+        return super().get_form(request, obj, **kwargs)
+
+    def get_fieldsets(self, request, obj=None):
+        if obj is None:
+            return [(None, {"fields": ("point", "delivery_date", "comment")})]
+        return super().get_fieldsets(request, obj)
+
     def save_model(self, request, obj, form, change):
-        if not change and obj.created_by_id is None:
-            obj.created_by = request.user
+        if not change:
+            if obj.created_by_id is None:
+                obj.created_by = request.user
+            prepared = getattr(obj, "_prepared", None)
+            if prepared is not None:
+                obj.delivery_date = prepared.delivery_date
+                obj.status = prepared.status
+                obj.total = prepared.total
+                obj.review_reason = prepared.review_reason
+                obj.debt_at_order = prepared.debt
+                obj.overdue_days_at_order = prepared.overdue_days
+                if prepared.status == OrderStatus.NEEDS_REVIEW:
+                    self.message_user(
+                        request,
+                        "У заказчика превышен порог долга, заказ получил статус "
+                        "«Требует решения». Подтвердите или отклоните его.",
+                        messages.WARNING,
+                    )
         super().save_model(request, obj, form, change)
 
     @admin.display(description="Заказчик", ordering="point__customer__name")
