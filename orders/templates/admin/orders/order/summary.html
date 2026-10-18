@@ -1,0 +1,104 @@
+{% extends "admin/base_site.html" %}
+{% block extrastyle %}
+  {{ block.super }}
+  <style>
+    .summary-bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 12px 0 20px; }
+    .summary-bar form { display: flex; gap: 8px; align-items: center; margin: 0; }
+    .summary-bar .spacer { flex: 1; }
+    .summary-warning { background: #fff4e5; border: 1px solid #c76a00; color: #7a4100; padding: 10px 14px; margin-bottom: 16px; border-radius: 4px; }
+    .summary-empty { padding: 24px 0; color: var(--body-quiet-color); }
+    .summary-table { width: 100%; margin-bottom: 24px; }
+    .summary-table td.num, .summary-table th.num { text-align: right; white-space: nowrap; }
+    .summary-table tr.total td { font-weight: bold; border-top: 2px solid var(--hairline-color); }
+    .summary-point { margin-bottom: 28px; break-inside: avoid; }
+    .summary-point h3 { margin: 0 0 4px; font-size: 15px; }
+    .summary-point .meta { color: var(--body-quiet-color); margin: 0 0 6px; }
+    .summary-point .comment { font-style: italic; margin: 0 0 6px; }
+    .print-title { display: none; }
+    @media print {
+      #header, .breadcrumbs, .summary-bar, #nav-sidebar, .skip-to-content-link { display: none !important; }
+      .main > .content, #content { padding: 0 !important; margin: 0 !important; width: 100% !important; }
+      .print-title { display: block; }
+      body { background: #fff; color: #000; }
+    }
+  </style>
+{% endblock %}
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Главная</a> &rsaquo;
+    <a href="{% url 'admin:orders_order_changelist' %}">Заказы</a> &rsaquo; Сводка
+  </div>
+{% endblock %}
+{% block content %}
+<div id="content-main">
+  <div class="summary-bar">
+    <a href="?date={{ prev_date|date:'Y-m-d' }}{{ producer_query }}">&larr; {{ prev_date|date:"d.m" }}</a>
+    <form method="get">
+      <input type="date" name="date" value="{{ summary.delivery_date|date:'Y-m-d' }}">
+      {% if producers %}
+        <select name="producer">
+          {% for p in producers %}<option value="{{ p.pk }}"{% if p.pk == summary.producer.pk %} selected{% endif %}>{{ p.name }}</option>{% endfor %}
+        </select>
+      {% endif %}
+      <button type="submit">Показать</button>
+    </form>
+    <a href="?date={{ next_date|date:'Y-m-d' }}{{ producer_query }}">{{ next_date|date:"d.m" }} &rarr;</a>
+    <span class="spacer"></span>
+    <button type="button" onclick="window.print()">Печать</button>
+    <a class="button" href="{% url 'admin:orders_order_summary_xlsx' %}?date={{ summary.delivery_date|date:'Y-m-d' }}{{ producer_query }}">Скачать Excel</a>
+    {% if can_send %}
+      <form method="post" action="{% url 'admin:orders_order_summary_send' %}">
+        {% csrf_token %}
+        <input type="hidden" name="date" value="{{ summary.delivery_date|date:'Y-m-d' }}">
+        <input type="hidden" name="producer" value="{{ summary.producer.pk }}">
+        <button type="submit"{% if not summary.producer.summary_emails %} disabled title="Укажите email в настройках производства"{% endif %}>Отправить на почту</button>
+      </form>
+    {% endif %}
+  </div>
+
+  <h1 class="print-title">{{ summary.producer.name }}: сводка на {{ summary.delivery_date|date:"d.m.Y" }}</h1>
+  <h2>Сводка на {{ summary.delivery_date|date:"d.m.Y, l" }}</h2>
+
+  {% if summary.pending_count %}
+    <div class="summary-warning">
+      Ещё {{ summary.pending_count }} {% if summary.pending_count == 1 %}заказ ждёт{% else %}заказов ждут{% endif %} подтверждения и не вошли в сводку.
+      <a href="{% url 'admin:orders_order_changelist' %}?delivery_date={{ summary.delivery_date|date:'Y-m-d' }}">Открыть заказы</a>
+    </div>
+  {% endif %}
+
+  {% if summary.is_empty %}
+    <p class="summary-empty">На эту дату нет подтверждённых заказов.</p>
+  {% else %}
+    <p>Заказов: <b>{{ summary.orders_count }}</b>, на сумму <b>{{ summary.total }} ₽</b>.</p>
+
+    <h2>По позициям</h2>
+    <table class="summary-table">
+      <thead><tr><th>Категория</th><th>Позиция</th><th>Ед.</th><th class="num">Количество</th><th class="num">Сумма, ₽</th></tr></thead>
+      <tbody>
+        {% for item in summary.items %}
+          <tr><td>{{ item.category }}</td><td>{{ item.name }}</td><td>{{ item.unit }}</td><td class="num">{{ item.quantity|floatformat:"-3" }}</td><td class="num">{{ item.amount }}</td></tr>
+        {% endfor %}
+        <tr class="total"><td colspan="4">Итого</td><td class="num">{{ summary.total }}</td></tr>
+      </tbody>
+    </table>
+
+    <h2>По точкам</h2>
+    {% for point in summary.points %}
+      <div class="summary-point">
+        <h3>{{ point.customer }} — {{ point.name }}</h3>
+        <p class="meta">{{ point.address }}. Заказы: {% for pk in point.order_ids %}<a href="{% url 'admin:orders_order_change' pk %}">№{{ pk }}</a>{% if not forloop.last %}, {% endif %}{% endfor %}</p>
+        {% for comment in point.comments %}<p class="comment">Комментарий: {{ comment }}</p>{% endfor %}
+        <table class="summary-table">
+          <thead><tr><th>Позиция</th><th>Ед.</th><th class="num">Количество</th><th class="num">Сумма, ₽</th></tr></thead>
+          <tbody>
+            {% for line in point.lines %}
+              <tr><td>{{ line.name }}</td><td>{{ line.unit }}</td><td class="num">{{ line.quantity|floatformat:"-3" }}</td><td class="num">{{ line.amount }}</td></tr>
+            {% endfor %}
+            <tr class="total"><td colspan="3">Итого по точке</td><td class="num">{{ point.total }}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    {% endfor %}
+  {% endif %}
+</div>
+{% endblock %}
