@@ -1,0 +1,85 @@
+{% extends "admin/base_site.html" %}
+{% block extrastyle %}
+  {{ block.super }}
+  <style>
+    .import-counts { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0 20px; }
+    .import-counts span { padding: 6px 12px; border: 1px solid var(--hairline-color); border-radius: 4px; }
+    .import-table { width: 100%; margin-bottom: 20px; }
+    .import-table td.num { white-space: nowrap; text-align: right; }
+    .st-create { color: #1b7a3d; font-weight: bold; }
+    .st-update { color: #0b5ed7; font-weight: bold; }
+    .st-error { color: #ba2121; font-weight: bold; }
+    .st-unchanged { color: var(--body-quiet-color); }
+    .import-note { color: var(--body-quiet-color); }
+    .import-warning { color: #c76a00; }
+    .import-hint { color: var(--body-quiet-color); margin: 8px 0 16px; }
+  </style>
+{% endblock %}
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Главная</a> &rsaquo;
+    <a href="{% url 'admin:catalog_product_changelist' %}">Позиции</a> &rsaquo; Импорт
+  </div>
+{% endblock %}
+{% block content %}
+<div id="content-main">
+  {% if not preview %}
+    <p class="import-hint">
+      Скачайте <a href="{% url 'admin:catalog_product_import_template' %}{% if producers %}?producer={{ producer.pk }}{% endif %}">шаблон</a>,
+      заполните и загрузите. Перед записью вы увидите, что изменится. Позиции сопоставляются по названию,
+      отсутствующие в файле остаются как есть.
+    </p>
+    <form method="post" enctype="multipart/form-data">
+      {% csrf_token %}
+      {% if producers %}
+        <p><label>Производство: <select name="producer">
+          {% for p in producers %}<option value="{{ p.pk }}"{% if p.pk == producer.pk %} selected{% endif %}>{{ p.name }}</option>{% endfor %}
+        </select></label></p>
+      {% endif %}
+      {{ form.as_p }}
+      <input type="submit" value="Проверить файл" class="default">
+    </form>
+  {% else %}
+    <h2>Предпросмотр: {{ producer.name }}</h2>
+    <div class="import-counts">
+      <span>Создать: <b>{{ plan.count_create }}</b></span>
+      <span>Изменить: <b>{{ plan.count_update }}</b></span>
+      <span>Без изменений: <b>{{ plan.count_unchanged }}</b></span>
+      <span>Ошибок: <b>{{ plan.count_error }}</b></span>
+    </div>
+    {% if plan.absent_count %}
+      <p class="import-hint">В каталоге есть ещё {{ plan.absent_count }} активных позиций, которых нет в файле. Они не изменятся.</p>
+    {% endif %}
+    <table class="import-table">
+      <thead><tr><th>Строка</th><th>Название</th><th>Что произойдёт</th><th>Детали</th></tr></thead>
+      <tbody>
+        {% for row in plan.rows %}
+          <tr>
+            <td class="num">{{ row.line }}</td>
+            <td>{{ row.name }}</td>
+            <td class="st-{{ row.action }}">{{ row.action_label }}</td>
+            <td>{% for text in row.errors %}{{ text }} {% endfor %}{% for text in row.changes %}{{ text }}{% if not forloop.last %}; {% endif %}{% endfor %}
+              {% for text in row.notes %}<div class="import-note">{{ text }}</div>{% endfor %}
+              {% for text in row.warnings %}<div class="import-warning">Внимание: {{ text }}.</div>{% endfor %}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if plan.has_errors %}
+      <p class="st-error">Исправьте ошибки в файле и загрузите его заново: частично импорт не выполняется.</p>
+      <a class="button" href="{% url 'admin:catalog_product_import' %}{% if producers %}?producer={{ producer.pk }}{% endif %}">Загрузить другой файл</a>
+    {% elif not plan.has_changes %}
+      <p>В файле нет изменений относительно каталога.</p>
+      <a class="button" href="{% url 'admin:catalog_product_changelist' %}">К списку позиций</a>
+    {% else %}
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="producer" value="{{ producer.pk }}">
+        <input type="hidden" name="confirm" value="1">
+        <input type="submit" value="Применить: создать {{ plan.count_create }}, изменить {{ plan.count_update }}" class="default">
+        <a class="button" href="{% url 'admin:catalog_product_import' %}{% if producers %}?producer={{ producer.pk }}{% endif %}">Отмена</a>
+      </form>
+    {% endif %}
+  {% endif %}
+</div>
+{% endblock %}
