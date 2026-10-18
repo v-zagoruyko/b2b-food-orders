@@ -1,0 +1,70 @@
+# Тестовый стенд на личном VPS: b2b-food-orders.zagoruykov.site. На сервере лежит как docker-compose.yml рядом с .env.
+# Боевой запуск будет отдельно: свой домен, www-роутер, бэкапы, реальная почта, без демо-данных.
+
+x-app: &app
+  image: ${IMAGE}
+  restart: unless-stopped
+  env_file: .env
+
+services:
+  web:
+    <<: *app
+    command: >
+      sh -c "python manage.py migrate --noinput
+      && python manage.py collectstatic --noinput
+      && if [ \"$$ALLOW_DEMO_SEED\" = \"True\" ]; then python manage.py seed_demo --if-empty; fi
+      && exec gunicorn core.wsgi --bind 0.0.0.0:8000 --workers 2 --timeout 60"
+    mem_limit: 256m
+    volumes:
+      - static:/app/staticfiles
+    networks: [default, proxy, db]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      - traefik.http.routers.b2b-food-orders.rule=Host(`b2b-food-orders.zagoruykov.site`)
+      - traefik.http.routers.b2b-food-orders.entrypoints=websecure
+      - traefik.http.routers.b2b-food-orders.tls.certresolver=le
+      - traefik.http.services.b2b-food-orders.loadbalancer.server.port=8000
+
+  # Автоматическая рассылка сводок: раз в 5 минут проверяет, кому пора отправить
+  scheduler:
+    <<: *app
+    command: >
+      sh -c "while true; do python manage.py send_summaries; sleep 300; done"
+    mem_limit: 128m
+    networks: [default, db]
+    depends_on:
+      web:
+        condition: service_healthy
+
+  # Раздача собранной статики админки
+  files:
+    image: nginx:alpine
+    restart: unless-stopped
+    mem_limit: 24m
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - static:/srv/static:ro
+    networks: [proxy]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.b2b-food-orders-files.rule=Host(`b2b-food-orders.zagoruykov.site`) && PathPrefix(`/static`)
+      - traefik.http.routers.b2b-food-orders-files.priority=100
+      - traefik.http.routers.b2b-food-orders-files.entrypoints=websecure
+      - traefik.http.routers.b2b-food-orders-files.tls.certresolver=le
+      - traefik.http.services.b2b-food-orders-files.loadbalancer.server.port=80
+
+volumes:
+  static:
+
+networks:
+  proxy:
+    external: true
+  db:
+    external: true

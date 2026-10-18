@@ -15,7 +15,9 @@ from payments.models import Payment
 from producers.models import Producer
 from users.models import User
 
-PASSWORD = "demo12345"
+# Пароль по умолчанию только для локальной разработки (DEBUG=True).
+DEBUG_PASSWORD = "demo12345"
+DEMO_ADMIN_EMAIL = "admin@example.com"
 
 # категория -> [(название, единица, шаг, цена)]
 CATALOG = {
@@ -149,11 +151,26 @@ class Command(BaseCommand):
         parser.add_argument(
             "--reset", action="store_true", help="Удалить все данные перед заполнением"
         )
+        parser.add_argument(
+            "--if-empty",
+            action="store_true",
+            help="Заполнить только пустую базу, иначе ничего не делать",
+        )
 
     @transaction.atomic
     def handle(self, *args, **options):
-        if not settings.DEBUG:
-            raise CommandError("Команда доступна только при DEBUG=True.")
+        if not (settings.DEBUG or settings.ALLOW_DEMO_SEED):
+            raise CommandError(
+                "Команда доступна при DEBUG=True или ALLOW_DEMO_SEED=True (тестовый стенд)."
+            )
+        self.password = settings.DEMO_PASSWORD or (
+            DEBUG_PASSWORD if settings.DEBUG else ""
+        )
+        if not self.password:
+            raise CommandError("Задайте DEMO_PASSWORD: пароль демо-пользователей.")
+        if options["if_empty"] and Producer.objects.exists():
+            self.stdout.write("В базе уже есть данные, демо-данные не создаются.")
+            return
         if options["reset"]:
             self._reset()
         elif Producer.objects.exists():
@@ -163,30 +180,33 @@ class Command(BaseCommand):
         self.today = datetime.date.today()
         self.telegram_seq = 100000000
 
-        User.objects.create_superuser("admin@example.com", "Платформа", PASSWORD)
+        if settings.DEBUG:
+            # Суперпользователя стенда создают вручную, демо-админ только локально.
+            User.objects.create_superuser(DEMO_ADMIN_EMAIL, "Платформа", self.password)
         main = self._producer_main()
         self._producer_second()
 
         self.stdout.write(self.style.SUCCESS("Демо-данные созданы."))
-        self.stdout.write(f"Пароль у всех: {PASSWORD}")
-        self.stdout.write("  admin@example.com — все производства")
+        if self.password == DEBUG_PASSWORD:
+            self.stdout.write(f"Пароль у всех: {self.password}")
+        else:
+            self.stdout.write(
+                "Пароль у всех демо-пользователей: значение DEMO_PASSWORD"
+            )
+        if settings.DEBUG:
+            self.stdout.write(f"  {DEMO_ADMIN_EMAIL} — все производства")
         for email, _name, group in STAFF:
             self.stdout.write(f"  {email} — {group}")
         self.stdout.write("  owner@sibiryachka.example — Владелец второго производства")
         self.stdout.write(f"Производство: {main}")
 
     def _reset(self):
-        for model in (
-            OrderLine,
-            Order,
-            Payment,
-            User,
-            Point,
-            Customer,
-            Product,
-            Category,
-            Producer,
-        ):
+        for model in (OrderLine, Order, Payment):
+            model.objects.all().delete()
+        # Настоящих суперпользователей (создан вручную на стенде) не трогаем.
+        User.objects.exclude(is_superuser=True).delete()
+        User.objects.filter(email=DEMO_ADMIN_EMAIL).delete()
+        for model in (Point, Customer, Product, Category, Producer):
             model.objects.all().delete()
 
     def _telegram_id(self):
@@ -195,7 +215,7 @@ class Command(BaseCommand):
 
     def _create_staff(self, producer, email, name, group):
         user = User.objects.create_staff(
-            email, name, PASSWORD, producer=producer, phone="+7 900 000-00-00"
+            email, name, self.password, producer=producer, phone="+7 900 000-00-00"
         )
         user.groups.add(Group.objects.get(name=group))
         return user

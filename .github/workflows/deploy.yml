@@ -1,0 +1,130 @@
+name: Deploy
+
+# Деплой только после зелёного CI на main
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  APP_DIR: /opt/apps/b2b-food-orders
+  DOMAIN: b2b-food-orders.zagoruykov.site
+
+jobs:
+  build:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Image name
+        id: meta
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}:${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: prod
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Setup SSH
+        env:
+          KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      # Значения стенда лежат здесь, секреты берутся из GitHub secrets репозитория.
+      # Список ключей должен совпадать с .env.example (новую переменную добавлять и туда).
+      - name: Render .env
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+          SECRET_KEY: ${{ secrets.B2B_SECRET_KEY }}
+          DB_PASSWORD: ${{ secrets.B2B_DB_PASSWORD }}
+          DEMO_PASSWORD: ${{ secrets.DEMO_PASSWORD }}
+        run: |
+          umask 077
+          cat > .env.deploy <<ENV
+          IMAGE=$IMAGE
+          SECRET_KEY=$SECRET_KEY
+          DEBUG=False
+          ALLOWED_HOSTS=$DOMAIN,localhost
+          CSRF_TRUSTED_ORIGINS=https://$DOMAIN
+          USE_HTTPS=True
+          POSTGRES_DB=b2b_orders
+          POSTGRES_USER=b2b_orders
+          POSTGRES_PASSWORD=$DB_PASSWORD
+          POSTGRES_HOST=postgres
+          POSTGRES_PORT=5432
+          ALLOW_DEMO_SEED=True
+          DEMO_PASSWORD=$DEMO_PASSWORD
+          DEFAULT_FROM_EMAIL=orders@$DOMAIN
+          TELEGRAM_BOT_USERNAME=
+          ENV
+
+      - name: Ensure database
+        env:
+          HOST: ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}
+          DB_PASSWORD: ${{ secrets.B2B_DB_PASSWORD }}
+        run: |
+          # deploy не имеет доступа в /opt/postgres, поэтому контейнер ищем по labels compose
+          ssh "$HOST" "docker exec -i \$(docker ps -q --filter label=com.docker.compose.project=postgres --filter label=com.docker.compose.service=postgres) psql -U postgres -v ON_ERROR_STOP=1" <<SQL
+          DO \$\$ BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'b2b_orders') THEN
+              CREATE ROLE b2b_orders LOGIN PASSWORD '$DB_PASSWORD';
+            ELSE
+              ALTER ROLE b2b_orders PASSWORD '$DB_PASSWORD';
+            END IF;
+          END \$\$;
+          SELECT 'CREATE DATABASE b2b_orders OWNER b2b_orders' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'b2b_orders')\gexec
+          SQL
+
+      - name: Deploy
+        env:
+          HOST: ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ssh "$HOST" "mkdir -p $APP_DIR"
+          scp docker-compose.prod.yml "$HOST:$APP_DIR/docker-compose.yml"
+          scp deploy/nginx.conf "$HOST:$APP_DIR/nginx.conf"
+          scp .env.deploy "$HOST:$APP_DIR/.env"
+          echo "$GHCR_TOKEN" | ssh "$HOST" "docker login ghcr.io -u $GHCR_USER --password-stdin"
+          ssh "$HOST" "cd $APP_DIR && chmod 600 .env && docker compose pull && docker compose up -d --remove-orphans && docker image prune -f"

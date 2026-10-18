@@ -64,6 +64,14 @@ uv run ruff check . && uv run ruff format .
 - Сводка на дату: `orders.summary.build_summary` (только `CONFIRMED` и `DELIVERED`, ждущие решения считаются отдельно как `pending_count`), Excel в `orders/exports.py`, страница с печатью в админке заказов (`/admin/orders/order/summary/`), письмо и журнал в `orders/notifications.py`. Автоотправка: `manage.py send_summaries` запускать по расписанию раз в 5 минут (настройки на производстве: email, время, на какую дату).
 - Долг считают заказы `CONFIRMED` и `DELIVERED` минус оплаты, просрочка по FIFO: `customers/services.py`.
 
+## Деплой (тестовый стенд)
+Стенд на личном VPS: `https://b2b-food-orders.zagoruykov.site` (путь на сервере `/opt/apps/b2b-food-orders/`). Это тестовая версия MVP; боевой запуск будет отдельно (свой домен, `www`-роутер, бэкапы, реальная почта, без демо-данных). Конвенции: skill `deploy-pet`, образец `~/Projects/Personal/fotoflash-backend`.
+- `Dockerfile` с целями `dev` (локально, compose) и `prod` (gunicorn, без dev-зависимостей). `docker-compose.prod.yml` (на сервере как `docker-compose.yml`): `web` (migrate, collectstatic, `seed_demo --if-empty` при `ALLOW_DEMO_SEED=True`, gunicorn), `scheduler` (цикл `send_summaries` раз в 5 минут), `files` (nginx раздаёт `/static/`), сети `proxy` и `db`. Около 400 МБ `mem_limit`.
+- `.github/workflows/ci.yml` (ruff, `makemigrations --check`, pytest на Postgres 17) и `deploy.yml` (после зелёного CI на `main`: образ в GHCR, роль и база `b2b_orders` в общем Postgres, `.env`, выкладка). Значения стенда лежат в workflow; новую переменную добавлять в `.env.example` и в шаг «Render .env».
+- Секреты репозитория: `B2B_SECRET_KEY`, `B2B_DB_PASSWORD` (`openssl rand -hex 32`), `DEMO_PASSWORD` (пароль всех демо-пользователей, только буквы и цифры); org-секреты `SSH_*` уже есть. Первый вход: суперпользователя создать на сервере `docker compose exec web python manage.py createsuperuser`.
+- На стенде `seed_demo` не создаёт демо-суперпользователя и берёт пароль из `DEMO_PASSWORD`; `--reset` не трогает настоящих суперпользователей. Демо-производство отправляет сводки на `kitchen@vkusny.example`: при настройке реального SMTP заменить адрес.
+- `/healthz` для healthcheck; `USE_HTTPS=True` включает доверие к `X-Forwarded-Proto` и защищённые cookie.
+
 ## Бэклог (после MVP-ядра)
 - Правка существующего заказа в карточке (строки, дата) идёт без проверок `prepare_order`: минимум, кратность и порог не пересчитываются.
 - Принятие `Invitation` и вход через Telegram Mini App (бот один на платформу, `startapp=<токен>`).

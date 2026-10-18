@@ -10,6 +10,9 @@ env = environ.Env(
     CSRF_TRUSTED_ORIGINS=(list, []),
     POSTGRES_PORT=(str, "5432"),
     TELEGRAM_BOT_USERNAME=(str, ""),
+    USE_HTTPS=(bool, False),
+    ALLOW_DEMO_SEED=(bool, False),
+    DEMO_PASSWORD=(str, ""),
     EMAIL_HOST=(str, ""),
     EMAIL_PORT=(int, 587),
     EMAIL_HOST_USER=(str, ""),
@@ -131,3 +134,14 @@ DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL")
 
 # Откат версий из истории отключён: правки идут только через обычные формы.
 SIMPLE_HISTORY_REVERT_DISABLED = True
+
+# За Traefik приложение видит http: схему берём из заголовка, cookie только по https.
+USE_HTTPS = env("USE_HTTPS")
+if USE_HTTPS:
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+
+# Демо-данные на тестовом стенде: команда seed_demo, пароль демо-пользователей.
+ALLOW_DEMO_SEED = env("ALLOW_DEMO_SEED")
+DEMO_PASSWORD = env("DEMO_PASSWORD")
